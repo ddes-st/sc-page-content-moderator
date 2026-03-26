@@ -796,14 +796,16 @@ export default function Home() {
                 {reviewResults.map((section, index) => (
                   <div
                     key={index}
-                    className={getResultBoxClasses(getScoreBadgeVariant(section.score))}
+                    className={getResultBoxClasses(
+                      getScoreBadgeVariant(section.score ?? 0)
+                    )}
                   >
                     <div className="mb-4 flex items-center justify-between gap-3">
                       <span className="text-xs font-semibold uppercase text-left">
                         {brandSections.find(bs => bs.id === section.sectionId)?.name}
                       </span>
                       <Badge
-                        colorScheme={getScoreBadgeVariant(section.score)}
+                        colorScheme={getScoreBadgeVariant(section.score ?? 0)}
                         size="md"
                         className="shrink-0"
                       >
