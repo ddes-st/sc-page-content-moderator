@@ -3,7 +3,6 @@
 import { useState, useEffect, useRef } from "react";
 import type { ApplicationContext, PagesContext } from "@sitecore-marketplace-sdk/client";
 import { useMarketplaceClient } from "@/utils/hooks/useMarketplaceClient";
-import { RotateCw } from "lucide-react";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -37,26 +36,111 @@ interface BrandSection {
   name: string;
 }
 
+interface BrandReviewResult {
+  sectionId: string;
+  score?: number;
+  reason?: string;
+  suggestion?: string;
+}
+
+interface ExtractionResults {
+  generated_attributes?: {
+    optimizedContent?: {
+      title?: string;
+      content?: string;
+    };
+  };
+  optimizedContent?: {
+    title?: string;
+    content?: string;
+  };
+}
+
 type Step = 1 | 2 | 3;
+
+const normalizeForBrandMatch = (value: string) => {
+  // Normalize to "letters+digits only" so "Foma Lux" ~= "Formalux".
+  const withoutDiacritics = value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
+  const lower = withoutDiacritics.toLowerCase();
+  return lower.replace(/[^a-z0-9]+/g, "");
+};
+
+const getDiceSimilarity = (a: string, b: string) => {
+  const s1 = normalizeForBrandMatch(a);
+  const s2 = normalizeForBrandMatch(b);
+  if (!s1 || !s2) return 0;
+  if (s1 === s2) return 1;
+
+  // For very short strings, fall back to prefix/substring checks.
+  if (s1.length < 2 || s2.length < 2) {
+    return s1.includes(s2) || s2.includes(s1) ? 0.8 : 0;
+  }
+
+  const makeBigrams = (s: string) => {
+    const set = new Set<string>();
+    for (let i = 0; i < s.length - 1; i++) {
+      set.add(s.slice(i, i + 2));
+    }
+    return set;
+  };
+
+  const aBigrams = makeBigrams(s1);
+  const bBigrams = makeBigrams(s2);
+  let intersection = 0;
+  aBigrams.forEach((bg) => {
+    if (bBigrams.has(bg)) intersection++;
+  });
+
+  return (2 * intersection) / (aBigrams.size + bBigrams.size);
+};
+
+const pickClosestBrandKit = (currentName: string, kits: BrandKit[]) => {
+  const normalizedCurrent = normalizeForBrandMatch(currentName);
+  if (!normalizedCurrent) return undefined;
+
+  let best: { kit: BrandKit; score: number } | undefined;
+
+  for (const kit of kits) {
+    const brandName =
+      typeof kit.brandName === "string" ? kit.brandName : String(kit.brandName ?? "");
+    const normalizedBrand = normalizeForBrandMatch(brandName);
+    if (!normalizedBrand) continue;
+
+    const substringBoost =
+      normalizedCurrent.includes(normalizedBrand) || normalizedBrand.includes(normalizedCurrent) ? 0.25 : 0;
+
+    const dice = getDiceSimilarity(currentName, brandName);
+    const score = Math.min(1, dice + substringBoost);
+
+    if (!best || score > best.score) {
+      best = { kit, score };
+    }
+  }
+
+  // Keep this conservative so we don't auto-select the wrong kit.
+  if (!best || best.score < 0.45) return undefined;
+  return best.kit;
+};
 
 export default function Home() {
   const { client, error, isInitialized } = useMarketplaceClient();
   const [appContext, setAppContext] = useState<ApplicationContext>();
   const [pagesContext, setPagesContext] = useState<PagesContext>();
   const [reviewStatus, setReviewStatus] = useState<string>("");
-  const [reviewResults, setReviewResults] = useState<any[]>([]);
+  const [reviewResults, setReviewResults] = useState<BrandReviewResult[]>([]);
   const [brandKits, setBrandKits] = useState<BrandKit[]>([]);
   const [brandSections, setBrandSections] = useState<BrandSection[]>([]);
   const [selectedBrandKitId, setSelectedBrandKitId] = useState<string>("");
   const [selectedSectionId, setSelectedSectionId] = useState<string>("");
   const [loadingSections, setLoadingSections] = useState<boolean>(false);
   const [isContextLoading, setIsContextLoading] = useState<boolean>(true);
-  const [extractionResults, setExtractionResults] = useState<any>(null);
+  const [extractionResults, setExtractionResults] = useState<ExtractionResults | null>(null);
   const [isExtracting, setIsExtracting] = useState<boolean>(false);
   const [currentStep, setCurrentStep] = useState<Step>(1);
   const [isReviewing, setIsReviewing] = useState<boolean>(false);
 
   const lastPageIdRef = useRef<string | undefined>(undefined);
+  const hasUserSelectedBrandKitRef = useRef<boolean>(false);
   const hasInitializedRef = useRef(false);
 
   useEffect(() => {
@@ -88,6 +172,7 @@ export default function Home() {
               }
         
               const currentPageId = data.pageInfo.id;
+              const previousPageId = lastPageIdRef.current;
               console.log(
                 "Page context initialized / updated. Page ID:",
                 currentPageId,
@@ -96,11 +181,20 @@ export default function Home() {
               );
         
               lastPageIdRef.current = currentPageId;
+
+              const pageChanged = Boolean(previousPageId && previousPageId !== currentPageId);
               setPagesContext(data);
               setReviewStatus("");
               setReviewResults([]);
               setExtractionResults(null);
               setCurrentStep(1);
+              if (pageChanged) {
+                // Reset selection so we can auto-preselect for the new page/site.
+                setSelectedBrandKitId("");
+                setSelectedSectionId("");
+                setBrandSections([]);
+                hasUserSelectedBrandKitRef.current = false;
+              }
               setIsContextLoading(false);
               hasInitializedRef.current = true;
             },
@@ -144,6 +238,30 @@ export default function Home() {
       fetchBrandSections(selectedBrandKitId);
     }
   }, [selectedBrandKitId]);
+
+  useEffect(() => {
+    if (!pagesContext?.pageInfo) return;
+    if (brandKits.length === 0) return;
+    if (selectedBrandKitId) return; // Don't override user's manual choice.
+    if (hasUserSelectedBrandKitRef.current) return;
+
+    const pageInfo = pagesContext.pageInfo;
+    const currentNameParts = [
+      pageInfo.displayName,
+      // Some contexts use `name` more than `displayName`.
+      (pageInfo as { name?: string }).name,
+      // Path usually contains the "site-ish" name segment(s).
+      pageInfo.path,
+      // Language may also help avoid ambiguity.
+      pageInfo.language,
+    ].filter(Boolean) as string[];
+
+    const currentName = currentNameParts.join(" ");
+    const closest = pickClosestBrandKit(currentName, brandKits);
+    if (closest) {
+      setSelectedBrandKitId(closest.id);
+    }
+  }, [brandKits, pagesContext?.pageInfo, selectedBrandKitId]);
 
   const fetchBrandSections = async (brandkitId: string) => {
     setLoadingSections(true);
@@ -209,8 +327,65 @@ export default function Home() {
       const itemData = graphqlResponse?.data?.data as {
         item?: { title?: { value?: string }; content?: { value?: string } };
       } | undefined;
-      const title = itemData?.item?.title?.value || "";
-      const content = itemData?.item?.content?.value || "";
+      let title = itemData?.item?.title?.value || "";
+      let content = itemData?.item?.content?.value || "";
+
+      // Brandreview rejects empty/whitespace-only input; ensure we always send meaningful text.
+      const sitecoreContextId = appContext?.resourceAccess?.[0]?.context?.preview;
+      const pageInfo = pagesContext.pageInfo;
+      const templateName = pageInfo?.template?.name;
+
+      const buildInputContent = () => `${title} ${content}`.trim();
+      const hasTitle = title.trim().length > 0;
+
+      // Last-resort fallback that doesn't require a template name.
+      // This is only for title (content will still be fetched below when missing).
+      if (!hasTitle) {
+        title =
+          pageInfo?.displayName ??
+          (pageInfo as { name?: string } | undefined)?.name ??
+          "";
+      }
+
+      const hasTitleAfterTitleFallback = title.trim().length > 0;
+      const hasContentAfterTitleFallback = content.trim().length > 0;
+
+      if (!hasTitleAfterTitleFallback || !hasContentAfterTitleFallback) {
+        // Fallback to the dedicated page-fields API (used elsewhere in this app).
+        // We do this when either title OR content is missing, so we retrieve both fields.
+        const fetchPageFields = async (): Promise<{ title: string; content: string } | null> => {
+          if (!sitecoreContextId || !templateName) return null;
+          try {
+            const res = await fetch("/api/page-fields", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                path: pageInfo.path,
+                language: pageInfo.language,
+                templateName,
+                sitecoreContextId,
+              }),
+            });
+            if (!res.ok) return null;
+            const data = (await res.json()) as { title?: string; content?: string };
+            return { title: data.title ?? "", content: data.content ?? "" };
+          } catch {
+            return null;
+          }
+        };
+
+        const fallback = await fetchPageFields();
+        if (fallback) {
+          title = fallback.title;
+          content = fallback.content;
+        }
+      }
+
+      const inputContent = buildInputContent();
+      if (!inputContent) {
+        setReviewStatus("Page content is empty; cannot run brand review");
+        return;
+      }
 
       const response = await fetch("/api/brandreview", {
         method: "POST",
@@ -220,7 +395,7 @@ export default function Home() {
         body: JSON.stringify({
           brandkitId: selectedBrandKitId,
           input: {
-            content: title + " " + content,
+            content: inputContent,
           },
           sections: selectedSectionId === "all" ? brandSections.map((section) => ({ sectionId: section.id })) : [{ sectionId: selectedSectionId }],
         }),
@@ -228,7 +403,7 @@ export default function Home() {
 
       if (response.ok) {
         const result = await response.json();
-        setReviewResults(result);
+        setReviewResults(result as BrandReviewResult[]);
         //setReviewStatus("Brand review completed successfully!");
         setCurrentStep(2);
       } else {
@@ -371,7 +546,7 @@ export default function Home() {
 
       if (response.ok) {
         const result = await response.json();
-        setExtractionResults(result);
+        setExtractionResults(result as ExtractionResults);
         setCurrentStep(3);
       } else {
         const errorText = await response.text();
@@ -501,7 +676,10 @@ export default function Home() {
                   <FieldLabel htmlFor="brandkit-select" className="text-xs font-semibold text-muted-foreground uppercase m-0 mb-2">Brand Kit</FieldLabel>
                   <Select
                     value={selectedBrandKitId}
-                    onValueChange={setSelectedBrandKitId}
+                    onValueChange={(id) => {
+                      hasUserSelectedBrandKitRef.current = true;
+                      setSelectedBrandKitId(id);
+                    }}
                   >
                     <SelectTrigger
                       id="brandkit-select"
