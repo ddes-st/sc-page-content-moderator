@@ -2,7 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 
 let cachedToken: { token: string; expiresAt: number } | null = null;
 
-async function getAuthToken() {
+async function getAuthToken(): Promise<string | null> {
+  const clientId = process.env.SITECORE_CLIENT_ID;
+  const clientSecret = process.env.SITECORE_CLIENT_SECRET;
+
+  if (!clientId || !clientSecret) {
+    return null;
+  }
+
   if (cachedToken && cachedToken.expiresAt > Date.now()) {
     return cachedToken.token;
   }
@@ -12,15 +19,17 @@ async function getAuthToken() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        client_id: process.env.SITECORE_CLIENT_ID,
-        client_secret: process.env.SITECORE_CLIENT_SECRET,
+        client_id: clientId,
+        client_secret: clientSecret,
         audience: "https://api.sitecorecloud.io",
         grant_type: "client_credentials",
       }),
     });
 
     if (!response.ok) {
-      throw new Error(`Failed to get auth token: ${response.status}`);
+      console.error(`Failed to get auth token: ${response.status}`);
+      cachedToken = null;
+      return null;
     }
 
     const data = await response.json();
@@ -29,7 +38,8 @@ async function getAuthToken() {
     return data.access_token;
   } catch (error) {
     console.error("Error fetching auth token:", error);
-    throw error;
+    cachedToken = null;
+    return null;
   }
 }
 
@@ -72,12 +82,16 @@ export async function POST(request: NextRequest) {
 
     const authToken = await getAuthToken();
 
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (authToken) {
+      headers["Authorization"] = `Bearer ${authToken}`;
+    }
+
     const response = await fetch(contentApiUrl, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${authToken}`,
-      },
+      headers,
       body: JSON.stringify({ query: graphqlQuery }),
     });
 
