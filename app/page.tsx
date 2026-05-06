@@ -300,14 +300,12 @@ export default function Home() {
 
       const graphqlQuery = `
       query {
-          item(path: "${pagesContext.pageInfo.path}",language:"${pagesContext.pageInfo.language}") {
-            ...on ${pagesContext.pageInfo?.template?.name}{
-              title{
-                value
-              },
-              content{
-                value
-              }
+          item(path: "${pagesContext.pageInfo.path}", language: "${pagesContext.pageInfo.language}") {
+            title: field(name: "title") {
+              value
+            }
+            content: field(name: "content") {
+              value
             }
           }
         }
@@ -501,10 +499,8 @@ export default function Home() {
         const graphqlQuery = `
           query {
             item(path: "${pageInfo.path?.replace(/"/g, '\\"') ?? ""}", language: "${pageInfo.language ?? ""}") {
-              ... on ${pageInfo.template?.name ?? "Item"} {
-                title { value }
-                content { value }
-              }
+              title: field(name: "title") { value }
+              content: field(name: "content") { value }
             }
           }
         `;

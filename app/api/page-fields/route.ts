@@ -46,11 +46,11 @@ async function getAuthToken(): Promise<string | null> {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { path, language, templateName, sitecoreContextId } = body;
+    const { path, language, sitecoreContextId } = body;
 
-    if (!path || !language || !templateName) {
+    if (!path || !language) {
       return NextResponse.json(
-        { error: "path, language, and templateName are required" },
+        { error: "path and language are required" },
         { status: 400 }
       );
     }
@@ -70,10 +70,8 @@ export async function POST(request: NextRequest) {
     const graphqlQuery = `
       query {
         item(path: "${path.replace(/"/g, '\\"')}", language: "${language}") {
-          ... on ${templateName} {
-            title { value }
-            content { value }
-          }
+          title: field(name: "title") { value }
+          content: field(name: "content") { value }
         }
       }
     `;
