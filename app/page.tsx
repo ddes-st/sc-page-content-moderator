@@ -313,33 +313,52 @@ export default function Home() {
         }
         `;
 
-      const graphqlResponse = await client?.mutate("xmc.preview.graphql", {
-        params: {
-          query: {
-            sitecoreContextId: appContext?.resourceAccess?.[0]?.context?.preview,
-          },
-          body: {
-            query: graphqlQuery,
-          },
-        },
-      });
-      console.log("Success retrieving query:", graphqlQuery);
-      const itemData = graphqlResponse?.data?.data as {
-        item?: { title?: { value?: string }; content?: { value?: string } };
-      } | undefined;
-      let title = itemData?.item?.title?.value || "";
-      let content = itemData?.item?.content?.value || "";
-
-      // Brandreview rejects empty/whitespace-only input; ensure we always send meaningful text.
       const sitecoreContextId = appContext?.resourceAccess?.[0]?.context?.preview;
       const pageInfo = pagesContext.pageInfo;
       const templateName = pageInfo?.template?.name;
 
+      let title = "";
+      let content = "";
+
+      // Attempt 1: Fetch via Marketplace SDK GraphQL proxy
+      try {
+        if (!client) {
+          console.warn("[brandReview] Marketplace client is not available, skipping GraphQL call");
+        } else if (!sitecoreContextId) {
+          console.warn("[brandReview] No sitecoreContextId available, skipping GraphQL call");
+        } else {
+          console.log("[brandReview] Calling xmc.preview.graphql...");
+          const graphqlResponse = await client.mutate("xmc.preview.graphql", {
+            params: {
+              query: {
+                sitecoreContextId,
+              },
+              body: {
+                query: graphqlQuery,
+              },
+            },
+          });
+          console.log("[brandReview] GraphQL response:", JSON.stringify(graphqlResponse?.data, null, 2));
+
+          const itemData = graphqlResponse?.data?.data as {
+            item?: { title?: { value?: string }; content?: { value?: string } };
+          } | undefined;
+          title = itemData?.item?.title?.value || "";
+          content = itemData?.item?.content?.value || "";
+
+          if (title || content) {
+            console.log("[brandReview] GraphQL returned data - title:", title.slice(0, 50), "content length:", content.length);
+          } else {
+            console.warn("[brandReview] GraphQL returned empty item data");
+          }
+        }
+      } catch (graphqlErr) {
+        console.error("[brandReview] GraphQL call failed:", graphqlErr);
+      }
+
       const buildInputContent = () => `${title} ${content}`.trim();
       const hasTitle = title.trim().length > 0;
 
-      // Last-resort fallback that doesn't require a template name.
-      // This is only for title (content will still be fetched below when missing).
       if (!hasTitle) {
         title =
           pageInfo?.displayName ??
@@ -351,10 +370,13 @@ export default function Home() {
       const hasContentAfterTitleFallback = content.trim().length > 0;
 
       if (!hasTitleAfterTitleFallback || !hasContentAfterTitleFallback) {
-        // Fallback to the dedicated page-fields API (used elsewhere in this app).
-        // We do this when either title OR content is missing, so we retrieve both fields.
+        console.log("[brandReview] Falling back to /api/page-fields (title present:", hasTitleAfterTitleFallback, ", content present:", hasContentAfterTitleFallback, ")");
+
         const fetchPageFields = async (): Promise<{ title: string; content: string } | null> => {
-          if (!sitecoreContextId || !templateName) return null;
+          if (!sitecoreContextId || !templateName) {
+            console.warn("[brandReview] Cannot call /api/page-fields - missing sitecoreContextId or templateName");
+            return null;
+          }
           try {
             const res = await fetch("/api/page-fields", {
               method: "POST",
@@ -366,10 +388,16 @@ export default function Home() {
                 sitecoreContextId,
               }),
             });
-            if (!res.ok) return null;
+            if (!res.ok) {
+              const errText = await res.text();
+              console.error("[brandReview] /api/page-fields returned", res.status, errText);
+              return null;
+            }
             const data = (await res.json()) as { title?: string; content?: string };
+            console.log("[brandReview] /api/page-fields returned - title:", (data.title ?? "").slice(0, 50), "content length:", (data.content ?? "").length);
             return { title: data.title ?? "", content: data.content ?? "" };
-          } catch {
+          } catch (err) {
+            console.error("[brandReview] /api/page-fields fetch error:", err);
             return null;
           }
         };
@@ -462,7 +490,14 @@ export default function Home() {
       };
 
       const fetchViaGraphQL = async () => {
-        if (!client || !sitecoreContextId) return null;
+        if (!client) {
+          console.warn("[optimize] Marketplace client is not available, skipping GraphQL call");
+          return null;
+        }
+        if (!sitecoreContextId) {
+          console.warn("[optimize] No sitecoreContextId available, skipping GraphQL call");
+          return null;
+        }
         const graphqlQuery = `
           query {
             item(path: "${pageInfo.path?.replace(/"/g, '\\"') ?? ""}", language: "${pageInfo.language ?? ""}") {
@@ -473,22 +508,32 @@ export default function Home() {
             }
           }
         `;
-        const graphqlResponse = await client.mutate("xmc.preview.graphql", {
-          params: {
-            query: { sitecoreContextId },
-            body: { query: graphqlQuery },
-          },
-        });
-        const raw = graphqlResponse?.data as Record<string, unknown> | undefined;
-        const dataObj = raw?.data ?? raw;
-        const item = (dataObj as Record<string, { title?: { value?: string }; content?: { value?: string } } | undefined>)?.item;
-        if (item) {
-          return {
-            title: item.title?.value ?? "",
-            content: item.content?.value ?? "",
-          };
+        try {
+          console.log("[optimize] Calling xmc.preview.graphql...");
+          const graphqlResponse = await client.mutate("xmc.preview.graphql", {
+            params: {
+              query: { sitecoreContextId },
+              body: { query: graphqlQuery },
+            },
+          });
+          console.log("[optimize] GraphQL response:", JSON.stringify(graphqlResponse?.data, null, 2));
+
+          const raw = graphqlResponse?.data as Record<string, unknown> | undefined;
+          const dataObj = raw?.data ?? raw;
+          const item = (dataObj as Record<string, { title?: { value?: string }; content?: { value?: string } } | undefined>)?.item;
+          if (item) {
+            console.log("[optimize] GraphQL returned data - title:", (item.title?.value ?? "").slice(0, 50), "content length:", (item.content?.value ?? "").length);
+            return {
+              title: item.title?.value ?? "",
+              content: item.content?.value ?? "",
+            };
+          }
+          console.warn("[optimize] GraphQL returned no item data");
+          return null;
+        } catch (err) {
+          console.error("[optimize] GraphQL call failed:", err);
+          return null;
         }
-        return null;
       };
 
       const fromPageInfo = () => ({
@@ -498,9 +543,11 @@ export default function Home() {
 
       let result = await fetchViaGraphQL();
       if (!result || (!result.title && !result.content)) {
+        console.log("[optimize] GraphQL had no usable data, falling back to /api/page-fields");
         result = await fetchViaApi();
       }
       if (!result || (!result.title && !result.content)) {
+        console.log("[optimize] /api/page-fields had no usable data, falling back to pageInfo displayName");
         result = fromPageInfo();
       }
       if (result) {
@@ -676,7 +723,7 @@ export default function Home() {
                   <FieldLabel htmlFor="brandkit-select" className="text-xs font-semibold text-muted-foreground uppercase m-0 mb-2">Brand Kit</FieldLabel>
                   <Select
                     value={selectedBrandKitId}
-                    onValueChange={(id) => {
+                    onValueChange={(id: string) => {
                       hasUserSelectedBrandKitRef.current = true;
                       setSelectedBrandKitId(id);
                     }}
